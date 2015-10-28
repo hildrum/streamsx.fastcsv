@@ -1,0 +1,38 @@
+
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+composite Main
+{
+    graph
+
+    stream<uint64 f1, uint64 f2> Data as O = CSVFileSource() {
+                                            param
+
+                                                            file : "threeLines.csv";
+                                                                            //              separator : ",";
+fileBufferSize : 64*1000;
+                                                                           
+                                                                                        output O: 
+                                                                                                        f1 = Field(0),
+                                                                                                                        f2 = Field(1);
+
+
+                                                                                                                                }
+
+() as checker = Custom(Data) {
+logic state: {
+    mutable int32 numTuples = 0;
+}
+onTuple Data: {
+    assert(f2==456ul,"Tuple: "+(rstring)Data);
+    assert(f1==((uint64)numTuples+100ul),"Tuple="+(rstring)Data);
+    numTuples++;
+    assert(numTuples<=3,"Expected to see only three tuples, but tuple counter is "+(rstring)numTuples);
+
+}
+onPunct Data: {
+    assert(numTuples==3,"Number of tuples: "+(rstring)numTuples);
+}
+} // end custom
+                                                                                                                                                                                                                    }
+

@@ -1,0 +1,7 @@
+*.out
+lineNumber*.csv
+lineNumber*.csv.gz
+outputFuncLongLine*.csv
+outputFuncMediumLine*.csv
+outputFuncShort*.csv
+allErrors*.csv

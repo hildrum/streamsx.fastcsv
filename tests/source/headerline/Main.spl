@@ -1,0 +1,52 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+
+composite Main {
+    param
+        expression<rstring> $inputFile: "lineNumber100000h1.csv";
+        expression<uint64> $lastErrorLine: 800000ul;
+        expression<list<rstring>> $badLine: [
+            "5,000000,error,0.3,5,5",
+                "norecordtype,000000,1.0,0.3,5,5"];
+   
+graph
+(stream<ShortType> FiveFields;
+ stream<rstring line,int32 code, rstring message, rstring filename,int32 lineno> Errors) = CSVFileSource() {
+    param file: $inputFile;
+fileBufferSize: 15*16000;
+numHeaderLines: 1;
+                output FiveFields: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber();
+}
+
+//() as sink1 = FileSink(FiveFields) {
+//    param file: "lineNumber_goodlines.out";
+//}
+
+//() as sink2 = FileSink(Errors) {
+//    param file: "lineNumber_errors.out";
+//}
+
+
+() as checker = Custom(Errors) {
+
+    logic state: {
+        mutable uint64 biggestLineNumber =1;
+    }
+    onTuple Errors: {
+        if ((uint64)lineno> biggestLineNumber) {
+            biggestLineNumber=(uint64)lineno;
+        }
+        // I'm not going ot do further message checking.
+        assert(message != "","Message is empty.  Tuple is "+(rstring)Errors);
+        assert(filename==$inputFile);
+        assert(code==2 || code==3,"Unexpected error code "+(rstring)code);
+        assert(lineno%8==0 || lineno%8==7);
+        assert(line==$badLine[1] || line==$badLine[0],"Unexpected bad line "+(rstring)Errors);
+    }
+    onPunct Errors:
+        assert(biggestLineNumber==$lastErrorLine,"Expected last line to be "+(rstring)$lastErrorLine+" but found "+(rstring)biggestLineNumber);
+}
+}

@@ -1,0 +1,48 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+
+composite Main {
+graph
+(stream<ShortType> FiveFields;
+ stream<rstring line> Errors) = CSVFileSource() {
+    param file: "lineNumber100000.csv";
+fileBufferSize: 15*16000;
+requireValue: true;
+    output FiveFields: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber(),
+            expectedVector=Field(1,"000000");
+}
+
+() as checker = Custom(FiveFields) {
+logic 
+    state: {
+        list<int32> maskList = [128,64,32,16,8,4,2,1];
+        mutable  uint64 lastLineNumber =1;
+    }
+onTuple FiveFields: { 
+assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+//assert(nextLineNumber==lineNumber,"Expected tuple number "+(rstring)nextLineNumber+" to have matching line number, but found "+(rstring)lineNumber);
+lastLineNumber=lineNumber;
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+//appTrc(Trace.error,"Tuple is "+(rstring)FiveFields);
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = 7 -i;
+        if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[i]+byteValue;
+        }
+     i++;
+    }
+    assert(recordType==6ul || 2 == (int32)nullVector[0],"nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(true,"expectedVector was unexpectedly empty");
+}
+}
+onPunct FiveFields:
+    assert(lastLineNumber==799997ul,"Expected lastLineNumber to be 799997, but found "+(rstring)lastLineNumber);
+}
+}

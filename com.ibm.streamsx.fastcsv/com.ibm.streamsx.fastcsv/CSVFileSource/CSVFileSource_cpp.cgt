@@ -1,0 +1,793 @@
+<% 
+my $compression = $model->getParameterByName("compression");
+$compression = $compression->getValueAt(0)->getSPLExpression() if $compression;
+%>
+
+/* Additional includes go here */
+#include<ctime>
+       #include <sys/types.h>
+       #include <sys/stat.h>
+       #include <fcntl.h>
+       #include <fstream>
+       #include <boost/iostreams/stream.hpp>
+#include <boost/iostreams/filtering_streambuf.hpp>
+#include <boost/iostreams/device/file_descriptor.hpp>
+  <%if ($compression) {%>
+    #include <boost/iostreams/filter/<%=$compression%>.hpp>
+<%}%>
+#include "copyFreeConversion.h"  
+
+<% 
+my $profiling = 0;
+if ($model->getParameterByName("profileOutfile")) { 
+	$profiling = 1;
+}
+
+my $requiredWithoutDefault = $model->getParameterByName("requireValue");
+$requiredWithoutDefault= $requiredWithoutDefault ? $requiredWithoutDefault->getValueAt(0)->getSPLExpression() eq "true" : 0;
+
+
+my $fileBufferSize ="1024*256";
+if ($model->getParameterByName("fileBufferSize")) {
+	$fileBufferSize = $model->getParameterByName("fileBufferSize")->getValueAt(0)->getCppExpression();
+}
+my $numThreads = $model->getParameterByName("numOmpThreads");
+if ($numThreads) {
+        $numThreads = SPL::CodeGen::extractPerlValue($numThreads->getValueAt(0)->getCppExpression(),$numThreads->getValueAt(0)->getSPLType());
+            SPL::CodeGen::exitln("Problem getting perl value from numThreads, got $numThreads") unless $numThreads;
+}
+%>
+<% if ($model->getParameterByName("profileOutfile")) { %>
+#include <iostream>
+#include <fstream>
+<%}%>
+#include <stdexcept>
+#include <algorithm>
+<% if ($numThreads) {%>
+#include <omp.h>
+    <%}%>
+<%SPL::CodeGen::implementationPrologue($model);%>
+
+<% 
+unshift @INC, dirname($model->getContext()->getOperatorDirectory()) . "/Common";
+
+require BatchFileSourceCommon;
+# // File parameter 
+my $file =  $model->getParameterByName("file");
+$file = $file->getValueAt(0)->getCppExpression() if $file;
+	# // input Port if defined
+	my $inputPort = $model->getInputPortAt(0);
+	
+if (defined $file && defined $inputPort) {
+	SPL::CodeGen::exitln("file parameter cannot be used with input port");
+}
+
+if (!(defined $file || defined $inputPort)) {
+	SPL::CodeGen::exitln("File parameter must be used when no input port present.");
+}
+
+
+ my $separateParam = $model->getParameterByName("separator");
+ my $separator = $separateParam ? $separateParam->getValueAt(0)->getSPLExpression() : "\",\"";
+
+(length $separator) == 3 || SPL::CodeGen::exitln("Separator must be one character, found $separator");
+
+ my ($numOutputs, $useRecordType, $errorPort)  = BatchFileSourceCommon::getOutputPortInfo($model);
+
+
+%>
+
+
+
+// Constructor
+MY_OPERATOR::MY_OPERATOR() : separator('<%=substr($separator,1,1)%>'),
+    port0Tuples(1024),
+    outTupleValid(1024),
+    lineStart(1024),
+logTag("BatchFileSource")<% if ($model->getParameterByName("profileOutfile")) { %>
+, readTime(0.0)
+, parseTime(0.0)
+, submitTime(0.0)
+, tupleCreateTime(0.0)
+, submitOnlyTime(0.0)
+<%}%>
+,shuttingDown(false)
+{
+	
+	
+	
+	fileBufferSize = <%=$fileBufferSize%>;
+	// OpenFile as binary file for block read in buffer 
+    // we may have to append a new line, so we leave space for that, just in case. 
+	inBuff = new char[fileBufferSize+1];
+
+	<% 
+	my $numNonErrorOutputs =1;
+	%>
+	// We're using the arguments to the Field output function to affect the compiled code,
+	// but SPL doesn't know that, and won't recompile if the arguments have changed.  So we
+	// do checks here.(Section maybe empty if no Fields.)
+	// This is fixable; we could wait to generate until runtime to generate the line-to-port functions. 
+	// and then we could skip this check.  
+	<% 
+		my $oPort = $model->getOutputPortAt(0);
+		for (my $j = 0; $j < SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort); $j++) {
+			my $attr = $oPort->getAttributeAt($j);
+			my $attrName = $attr->getName();
+			my $hasAssign = $attr->hasAssignment(); 
+			my $hasOp = $hasAssign && $attr->hasAssignmentWithOutputFunction();
+			if ($hasOp && $attr->getAssignmentOutputFunctionName() eq "Field") {
+				my $fieldNum =  $attr->getAssignmentOutputFunctionParameterValues()->[0]->getSPLExpression();
+				my $cppExpr = $attr->getAssignmentOutputFunctionParameterValues()->[0]->getCppExpression();
+	 %>
+	 		if (<%=$fieldNum%> != <%=$cppExpr%>) {
+	 			// In general, we do not throw exceptions.  However, this can only be thrown on start up, so it won't crash the operator
+	 			// unexpectedly.
+	 			throw std::runtime_error("Argument to Field for attribute <%=$attrName%> on port 0 changed between compile time value and runtime, clean and recompile");
+	 		}
+	  <% }  # end if operation
+	    } #end  attribute for loop. 
+        %>
+<% if ($profiling) { 
+                    my $pfile = $model->getParameterByName("profileOutfile")->getValueAt(0)->getCppExpression();
+                                    %>
+                                                        profileFile.open(<%=$pfile%>.c_str(),std::ios_base::out);
+<%}%>
+}
+
+
+std::string MY_OPERATOR::getErrorString(int code)  {
+	if (code == 0) {
+		SPLAPPTRC(L_ERROR,"Invalid error code " << code,logTag);
+		return "unknown error";
+	}
+	else if (code == ERROR_UNKNOWN_RECORD_TYPE) {
+		return "operator not configured for record type";
+	}
+	else if (code == ERROR_NO_RECORD_TYPE) {
+		return "no record type could be determined";
+	}
+	else if (code == ERROR_PARSING_LINE) {
+		return "record type valid but line could not be parsed";
+	}
+	else if (code == ERROR_TOO_MANY_RECORDS) {
+		return "File incompletely processed; either fileBufferSize should be decreased, or tuplesPerBatch should be increased";
+	}
+	else {
+		SPLAPPTRC(L_ERROR,"Invalid error code " << code,logTag);
+		return "unknown error";
+		
+		}
+}
+
+// Notify pending shutdown
+void MY_OPERATOR::prepareToShutdown() 
+{
+	shuttingDown = true;
+	
+}
+
+
+// Notify port readiness
+void MY_OPERATOR::allPortsReady() 
+{
+
+	<% if ($file) { %>
+	createThreads(1); // Create source thread
+	<%}%>
+}
+ 
+
+// Processing for source and threaded operators   
+void MY_OPERATOR::process(uint32_t idx)
+{
+	<% if ($file) { %>
+	setFileVariables();
+	parseNetroFile(<%=$file%>);
+	<%}%>
+}
+
+
+// Tuple processing for non-mutating ports
+void MY_OPERATOR::process(Tuple const & tuple, uint32_t port)
+{
+
+
+	<%if ($inputPort) {
+
+	my $firstInputAttr = $inputPort->getAttributeAt(0)->getName();
+	my $inputTupleType = $inputPort->getCppTupleType(); 
+	%>
+	
+	AutoPortMutex am(_mutex, *this);
+	//   IPort0Type & t = static_cast<IPort0Type&>(tuple);
+	const <%=$inputTupleType%>& t = static_cast<const <%=$inputTupleType%>&>(tuple);
+	rstring fileName = t.get_<%=$firstInputAttr%>();
+	setFileVariables(static_cast<IPort0Type const&>(tuple));
+	parseNetroFile(fileName);
+	<%}%>
+}
+
+void MY_OPERATOR::globalError(const int code, std::string const & message) {
+
+<% if ($errorPort) {
+	my $portNum = $model->getNumberOfOutputPorts -1;
+	%>
+	OPort<%=$portNum%>Type toSubmit;
+	<%
+	my $oPort = $model->getOutputPortAt($portNum);
+	my $numAttr =  SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort);
+	for (my $i = 0; $i < $numAttr; $i++) {
+		 	my $attr = SPL::Operator::Instance::OutputPort::getAttributeAt($oPort,$i);
+		 	my $attrName = $attr->getName();
+		 	if (BatchFileSourceCommon::isLineNumberAttribute($attrName)) { %>
+		 	// no need to give line number
+		 	<%}	 elsif ($attrName eq "line") {%>
+		 	// no line text
+		 	<%} elsif (BatchFileSourceCommon::isErrorCodeAttribute($attrName)) { %>
+		 	toSubmit.set_<%=$attrName%>(code);
+		 	<%} elsif ($attrName eq "message") { %>
+		 	toSubmit.get_<%=$attrName%>().assign(getErrorString(code));
+		 	<%} elsif (BatchFileSourceCommon::isFileAttribute($attrName)) { %>
+		 	toSubmit.get_<%=$attrName%>().assign(currFile);
+		 	<%} else {
+		 		SPL::CodeGen::exitln("Do not know how to populate attribute $attrName on error port");
+			  } # end attribute name if
+		} # end loop over attributes
+		%>
+		submit (toSubmit, <%=$portNum%>); 
+	<% } else { %>
+		SPLAPPTRC(L_ERROR,"Error "<< code << " message: " << message,logTag);
+	<%}%>
+}
+
+
+void MY_OPERATOR::handleError(const int code, const int lineNum, const size_t lineStart,const size_t lineEnd) {
+            size_t len;
+                        if (inBuff[lineEnd] == '\n') {
+                                        len = lineEnd - lineStart;
+                                                    }
+                                                                else {
+                                                                                // we assume we want to include line end.
+                                                                                                len = lineEnd - lineStart +1;
+                                                                                                            }
+
+<% if ($errorPort) { 
+			my $portNum = 1; 
+			%>
+			SPLAPPTRC(L_DEBUG,"Error code " << code << " line start " << lineStart << " line end " << lineEnd,logTag);
+			OPort1Type toSubmit;
+
+            SPLAPPTRC(L_DEBUG,"Last char is " << inBuff[lineEnd] << " code " << (int) inBuff[lineEnd],logTag);
+            <%
+			my $oPort = $model->getOutputPortAt($portNum);
+			my $numAttr =  SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort);
+			for (my $i = 0; $i < $numAttr; $i++) {
+			 	my $attr = SPL::Operator::Instance::OutputPort::getAttributeAt($oPort,$i);
+			 	my $attrName = $attr->getName();
+			 	if (BatchFileSourceCommon::isLineNumberAttribute($attrName)) { %>
+			 	toSubmit.set_<%=$attrName%>(lineNum);
+			 	<%}	 elsif ($attrName eq "line") {%>
+			 	toSubmit.get_<%=$attrName%>().assign(inBuff+lineStart,len);
+			 	<%} elsif (BatchFileSourceCommon::isErrorCodeAttribute($attrName)) { %>
+			 	toSubmit.set_<%=$attrName%>(code);
+			 	<%} elsif (BatchFileSourceCommon::isFileAttribute($attrName)) { %>
+			 	toSubmit.get_<%=$attrName%>().assign(currFile);
+			 	<%} elsif ($attrName eq "message") { %>
+			 	toSubmit.get_<%=$attrName%>().assign(getErrorString(code));
+			 	<%} else { 
+			 	SPL::CodeGen::exitln("Do not know how to populate attribute $attrName on error port");
+				} # end attribute if statement. 
+			} # end loop over attributes
+			%>
+			submit (toSubmit, <%=$portNum%>); 
+		<% } else { %>
+			SPLAPPTRC(L_ERROR,"Error "<< getErrorString(code) << " at line "<< lineNum << " line: " << std::string(inBuff,lineStart,len),logTag);
+		<%}%>
+}
+
+		
+bool MY_OPERATOR::parseLine(const int lineNum, const char * input, size_t &startOffset, const size_t maxOffset,OPort0Type & tuple) {
+
+    SPLAPPTRC(L_DEBUG,"Processing a line at index " << startOffset << " max offset is " << maxOffset ,logTag);
+    bool lineOkay = true;
+    size_t index = startOffset;
+    int code = 0;
+    <%
+        my $numAttr =  SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort);
+        my $numBytes = $numAttr/8;
+        if ($numAttr%8 != 0) {
+            $numBytes++;
+        }
+        my $initializer = "{";
+        for (my $i = 0; $i < $numBytes; $i++) {
+            $initializer .= "0";
+            if ($i != $numBytes - 1) {
+                $initializer .= ",";
+            }
+        }
+        $initializer .= "}";
+    %>
+    unsigned char nullVector[] = <%=$initializer%>;
+        <% # this is our data prep loop.  First, we have to establish the ordering we'll pick up attributes
+           # from teh file.  
+            my @fileIndexToSPLIndex;
+            my $useField;
+            my @requiredVector;
+            my $useLineNumber;
+            my $useEmptyField;
+            my %defaultValue;
+            my $fileTupleMatch;
+            my %specialHandling;
+            for (my $j = 0; $j < SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort); $j++) {
+                my $attr = $oPort->getAttributeAt($j);
+                my $attrName = $attr->getName();
+                my $hasAssign =  $attr->hasAssignment();
+                my $hasOp =  $hasAssign  &&  $attr->hasAssignmentWithOutputFunction() && ($attr->getAssignmentOutputFunctionName() ne "AttributeIndex");
+                my $varKey = "$attrName";
+                my $operation = $hasOp ? $attr->getAssignmentOutputFunctionName() : 0;
+                my $splType = $attr->getSPLType();
+                if (!$hasOp && $hasAssign) {  # assignemnt without an output function
+# used when giving defaults
+# eg, myfield = 3, 
+# we'll compute the expression once per file.  fileid, ingestiontimestamp are handled this way.
+# eg, fileid = getFileId(filename),
+# ingestiontimestamp = ...
+                    $specialHandling{$varKey} = "assignment";
+                } elsif ($hasOp && $operation eq "Field") { #the field output function
+                    my $paramList = $attr->getAssignmentOutputFunctionParameterValues();
+                    my @params = @$paramList;
+                    SPL::CodeGen::exitln("Expected either one or two arguments to output function Field") if (scalar(@params) > 2 || scalar(@params) == 0);
+# check the first argument
+                    my $fieldNum =  $attr->getAssignmentOutputFunctionParameterValues()->[0]->getSPLExpression();
+                    if ($fieldNum !~ /^[0-9]+$/) {
+                        SPL::CodeGen::exitln("Parameter to Field must be a constant integer, found $fieldNum");
+                    }
+                    if ($fieldNum != $j) {
+# As long as fieldNum is $j+1, then that means there's no re-ordering, and so no chance of ambiguity.
+                        $useField = 1;
+                    }
+                    SPL::CodeGen::exitln("Attempt to populate both SPL attibute $fileIndexToSPLIndex[$fieldNum] and $j from file field $fieldNum") if $fileIndexToSPLIndex[$fieldNum];
+                    $fileIndexToSPLIndex[$fieldNum] = $j;
+                    if (scalar(@params) == 2) {
+                        $attrName = $attr->getName();
+# Someone has given a default value for this field. 
+                        my $defaultExpression =  $attr->getAssignmentOutputFunctionParameterValues()->[1];
+                        SPL::CodeGen::warnln("Default expression for attribute $attrName has side effects") if $defaultExpression->hasSideEffects();
+                        SPL::CodeGen::exitln("Default expression for attribute $attrName has stream attributes") if $defaultExpression->hasStreamAttributes
+                            ();
+                        my $defaultType = $attr->getAssignmentOutputFunctionParameterValues()->[1]->getCppType();
+                        my $defaultExpr =  $attr->getAssignmentOutputFunctionParameterValues()->[1]->getCppExpression(); %>
+     const static <%=$defaultType%> default_<%=$attrName%> = <%=$defaultExpr%>;
+                        <%
+                        $defaultValue{$attrName} =1;
+                    }
+                    else {
+                        if ($requiredWithoutDefault) {
+                            $requiredVector[int($j/8)] = $requiredVector[int($j/8)] | ($j%8);
+                        }
+                    }
+                } elsif ($hasOp && $operation eq "LineNumber") {
+                    $specialHandling{$varKey} = "LineNumber";
+                    $useLineNumber = 1;
+                } elsif ($hasOp && $operation eq "EmptyFieldVector") {
+                    $specialHandling{$varKey} = "EmptyFieldVector";
+                    $useEmptyField =1 ;
+                } elsif (!$hasAssign || ($hasOp && $operation eq "AttributeIndex")) { 
+                    $fileTupleMatch =1;
+# boring mapping.
+                    SPL::CodeGen::exitln("Attempt to populate both SPL attibute $fileIndexToSPLIndex[$j] and $j from file field $j") if $fileIndexToSPLIndex[$j];
+                    $fileIndexToSPLIndex[$j] = $j;
+                    if ($requiredWithoutDefault) {
+                        $requiredVector[int($j/8)] = $requiredVector[int($j/8)] | 1<<($j%8);
+                    }
+                } else {
+                    SPL::CodeGen::exitln("Unknown output function $operation");
+                }
+            } #end  for loop.
+
+# Now step two--parse a line of hte file.
+
+# loop through all the relevant fields in order of appearance in the file.  This can be different than
+# the order of appearance in the SPL!
+            for (my $j = 0; $j < scalar(@fileIndexToSPLIndex); $j++) {
+                my $attrIndex = $fileIndexToSPLIndex[$j];
+                my $attr = SPL::Operator::Instance::OutputPort::getAttributeAt($oPort,$fileIndexToSPLIndex[$j]);
+                my $splType = $attr->getSPLType();
+                my $attrName = $attr->getName();
+
+                SPL::CodeGen::exitln("Internal error: special handling for field from file") if exists $specialHandling{"${attrName}"};
+                if ($fileIndexToSPLIndex[$j] =~ /\d/) {
+                    my $byteNum = int($attrIndex/8);
+                    my $bitNum = $attrIndex%8;
+                my $mask = 1 << $bitNum;
+                my $lastTwoArgs = ", &(nullVector[$byteNum]),$mask";
+
+                if (SPL::CodeGen::Type::isRString($splType) || SPL::CodeGen::Type::isBString($splType))  { 
+# the beginning of the string is where i is pointing now.%>
+                    const size_t start_<%=$attrName%> = index;
+                    const size_t len_<%=$attrName%> = str_to_rstring (input , &index , maxOffset , separator ,  lineOkay <%=$lastTwoArgs%>);
+                <%}
+                elsif ($splType eq "float32" || $splType eq "float64") {
+                    my $format = $splType eq "float64" ? "lf" : "f";
+                    my $def = 0.0;
+                    if ($defaultValue{$attrName}) {
+                        $def = "default_$attrName";
+                    }%>
+                    if (lineOkay) {
+                        const size_t fieldStart = index;
+                        // first, we eat white space.
+                        //
+                        while (input[index]==' ' && index < maxOffset) {
+                            index++;
+                        }
+                        if (input[index] == separator || input[index]== '\n') {
+                            // field is empty
+                            tuple.set_<%=$attrName%>(<%=$def%>);
+                            nullVector[<%=$byteNum%>] = nullVector[<%=$byteNum%>] | <%=$mask%>;
+                            if (input[index] == separator) index++;
+                        }
+                        else {
+                            char * endNum;
+                            double result = strtod(input+index,&endNum);
+                            if (endNum == input+index) {
+                                // nothing was read.  Since we know the field isn't just blank,
+                                // this is an error.
+                                lineOkay=false;
+                                next_field(input,&index,separator,lineOkay);
+                            }
+                            else {
+                               tuple.set_<%=$attrName%>(result);
+                               index = endNum - input;
+                               index++;
+                            }
+                        }
+                    }
+                <%} elsif($splType eq "uint64") {
+                    my $def = 0;
+                    if ($defaultValue{$attrName}) {
+                        $def = "default_$attrName";
+                    }%>
+                    tuple.get_<%=$attrName%>() = str_to_uint64  (input, &index , maxOffset , separator,lineOkay  <%=$lastTwoArgs%> , <%=$def%>);<%
+                } else {
+                    SPL::CodeGen::exitln("unsupported type $splType");
+                } # end type if/else
+               %>//if (!lineOkay) { SPLAPPTRC(L_ERROR,"Failed on field <%=$j%> name <%=$attrName%>",logTag);}<%
+            } else {
+# field j from file be ignored. %>
+
+                next_field(input,&index,separator,lineOkay);<%
+            } #end field j
+   %> //SPLAPPTRC(L_ERROR," line number " << lineNum << " after field " << <%=$j%> << " line is " << lineOkay, logTag); <%
+
+            } #end for loop
+
+        if ($requiredWithoutDefault) {
+            for (my $b = 0; $b < int($numAttr/8); $b++) {
+                %>
+                if (nullVector[<%=$b%>] & (unsigned char)<%=$requiredVector[$b]%>) {
+                    //      SPLAPPTRC(L_ERROR,"Line null at " << <%=$b%> << " is " << (int)nullVector[<%=$b%>],logTag);
+                    lineOkay = false;
+                    code = ERROR_PARSING_LINE;
+                }
+           <% }  # end loop over requried vector.
+        } # end requiredwithoutdefualt
+%>
+
+// Now take care of the any other tuple values.
+<%
+for (my $j = 0; $j < SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort); $j++) {
+    my $attr = $oPort->getAttributeAt($j);
+    my $attrName = $attr->getName();
+    my $varKey = $attrName;
+    my $splType = $attr->getSPLType();
+    if (!(defined $specialHandling{$varKey}) && SPL::CodeGen::Type::isString($splType)) {
+        if ($defaultValue{$attrName}) { %>
+                if (len_<%=$attrName%> == 0) {
+                    tuple.get_<%=$attrName%>().assign(default_<%=$attrName%>);
+                    }
+                else 
+                <%}  # end default value else 
+        %> {
+            tuple.get_<%=$attrName%>().assign(input+start_<%=$attrName%>,len_<%=$attrName%>);
+        }
+        <% } elsif ($specialHandling{$varKey} eq "EmptyFieldVector") {
+            my $numBytes = int($numAttr/8);
+            if ($numAttr%8 != 0) {
+                $numBytes++;
+            }%>
+           tuple.get_<%=$attrName%>().clear();
+           tuple.get_<%=$attrName%>().reserve(<%=$numBytes%>);
+           <%
+            for (my $k = 0; $k < $numBytes; $k++) {%>
+                tuple.get_<%=$attrName%>().push_back(nullVector[<%=$k%>]);
+            <%}
+        } elsif ( $specialHandling{$attrName} eq "LineNumber" ) {
+            print "tuple.set_${attrName}(lineNum);\n";
+        }
+        elsif ($specialHandling{$varKey} eq "assignment") {%>
+            tuple.set_<%=$attrName%>(port0_<%=$attrName%>);
+        <%}
+        elsif (defined $specialHandling{$varKey}) {
+            SPL::CodeGen::errorln("Unknown special handling for  $attrName");
+        }
+        else {
+            # nothing needed in this stage for this attribute.
+        }
+    } # end for
+        %>
+        const size_t lineStart = startOffset;
+        SPLAPPTRC(L_DEBUG,"line start = " << lineStart,logTag);
+        while(input[startOffset] != '\n' && startOffset < maxOffset) {
+             startOffset++;
+        }
+        SPLAPPTRC(L_DEBUG,"now start offset is " << startOffset << " code is " << (int)input[startOffset] << " inbuff " << (int)inBuff[startOffset] ,logTag);
+        if (!lineOkay) {
+            if (code == 0) {
+                code = ERROR_PARSING_LINE;
+            }
+            handleError(code,lineNum,lineStart,startOffset);
+        }
+        startOffset++;  // move past the newline; will not cause problems if this is the last line in the block
+        return lineOkay;
+}
+
+double MY_OPERATOR::timeDiffSec( struct timespec *t1, struct timespec *t2)
+{
+            double diff;
+            long secondsDiff = t2->tv_sec - t1->tv_sec;
+            long nanoDiff = t2->tv_nsec - t1->tv_nsec;
+            return (double)secondsDiff + (double)nanoDiff/1.0e9;
+}
+
+
+unsigned int MY_OPERATOR::processBlock(const char * inBuff, const size_t len, int lineSoFar) {
+    SPLAPPTRC(L_INFO,"Processing a block of lenght " << len ,logTag);
+    unsigned int totalSent = 0;
+    bool error = false;
+    unsigned int currLineNo = lineSoFar;
+    outTupleValid.reset();
+	<% if ($profiling) { %>
+	    struct timespec enterSubmit;
+	    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&enterSubmit);
+	<%}%>
+    
+    <% if ($numThreads) { 
+          my $toAdd = "";
+          if ($numThreads > 0) {
+              $toAdd = " num_threads($numThreads)";
+           } 
+        %> 
+    // first, figure out where each line starts.
+    // We could parallelize this, but it gets messy.
+    lineStart[0] = 0;
+    int linesInBlock = 0;
+    for (int i = 0; i < len -1; i++ ) {
+        if (linesInBlock +1 >= lineStart.size()) {
+            lineStart.resize(lineStart.size()*2);
+        }
+        if (inBuff[i] == '\n') {
+            lineStart[linesInBlock+1] =i+1;
+            linesInBlock++;
+        }
+    }
+    linesInBlock++;
+    // if needed, increase the size of our data structures.
+    if (linesInBlock  > port0Tuples.size()) {
+        port0Tuples.resize(linesInBlock);
+        outTupleValid.clear();
+        outTupleValid.resize(linesInBlock,false);
+    }
+    lineStart[linesInBlock] = len;
+  
+    // now, we want to process the lines in parallel.
+    #pragma omp parallel for <%=$toAdd%>
+    for (int line = 0; line < linesInBlock; line++) {
+        size_t index = lineStart[line];
+        outTupleValid.set(line,parseLine(line+lineSoFar,inBuff,index,lineStart[line+1],port0Tuples.at(line)));    
+    }
+    currLineNo = lineSoFar+linesInBlock;
+    <%} else  {%>
+    size_t index = 0;
+    size_t iStart = 0;
+      
+    for (size_t i = iStart ; index < len && !error; i++) {
+        if (i >= port0Tuples.size()) {
+            port0Tuples.resize(port0Tuples.size()*2);
+            outTupleValid.resize(port0Tuples.size()*2,false);
+        }
+        outTupleValid.set(i,parseLine(currLineNo,inBuff, index,len,port0Tuples[i]));
+        // index is updated.
+        currLineNo++;
+    }
+    <%} # end single-thread%>
+    <% if ($profiling) { %>
+        struct timespec endTupleCreate;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID,&endTupleCreate);
+        <%}%>
+
+	for(int i = 0; i < currLineNo-lineSoFar; i++) {
+        if (outTupleValid[i]) {
+			submit (port0Tuples[i], 0); 
+		    totalSent++;
+		}
+	} // end submit loop.
+	
+	 <% if ($profiling) { %>
+	    struct timespec endSubmit;
+	    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&endSubmit);
+	
+	  	tupleCreateTime += timeDiffSec(&enterSubmit,&endTupleCreate);
+	 	submitOnlyTime += timeDiffSec(&endTupleCreate,&endSubmit);
+	 <%}%>
+	 return currLineNo;
+	} // end submit tuples
+	
+	
+	<% my $fileVariableArgs ="";
+		if (defined $inputPort) {
+			$fileVariableArgs = "IPort0Type const & ".$inputPort->getCppTupleName();
+		}
+	%>
+void MY_OPERATOR::setFileVariables(<%=$fileVariableArgs%>) {
+	// set any file variables
+	SPLAPPTRC(L_DEBUG, "Setting the file variables",logTag);
+		<% 
+		
+	 	my $oPort = $model->getOutputPortAt(0);
+		my $numAttr =  SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort);
+		
+	 	for (my $j = 0; $j < $numAttr; $j++) {
+	 	my $attr = SPL::Operator::Instance::OutputPort::getAttributeAt($oPort,$j);
+	 	my $attrName = $attr->getName();
+	 	if (exists $specialHandling{$attrName} && $specialHandling{$attrName} eq "assignment") {
+			SPL::CodeGen::exitln("Error with attribute $attrName") if !$attr->hasAssignment();
+	 		my $cppExpr = $attr->getAssignmentValue()->getCppExpression();
+	 		print "${BatchFileSourceCommon::indent}port0_${attrName} = $cppExpr;\n";
+		} # end if
+	} #end loop over attributes for port $i
+			
+	%>
+}
+
+void MY_OPERATOR::parseNetroFile(rstring fileName)
+{
+
+	// ===========================
+	// Open the given File
+	// ===========================
+
+    rstring fullFile;
+    if (fileName[0] != '/') {
+        fullFile = SPL::Functions::Utility::dataDirectory()+"/"+fileName;
+    }
+    else {
+        fullFile = fileName;
+    }
+	int fd = open (fullFile.c_str(), O_RDONLY | O_LARGEFILE);
+	
+	if (fd < 0 ) {
+		SPLAPPTRC(L_ERROR, "Could not open input file " << fileName << " (abs: " << fullFile << ")", logTag);
+		std::stringstream message;
+		message << "File " << fileName  << " did not open, error code is " << errno;
+		currFile=fileName;
+        globalError(ERROR_FILE_DID_NOT_OPEN,message.str());
+		return;
+	}
+    currFile=fileName;
+	SPLAPPTRC(L_INFO, "Successfully opened file " << fileName, logTag);
+	boost::iostreams::filtering_streambuf<boost::iostreams::input> filt_str;
+	boost::iostreams::file_descriptor_source fd_src (fd, true);
+	 <%if ($compression) {%>
+        filt_str.push (boost::iostreams::<%=$compression%>_decompressor());
+    <%}%>
+	filt_str.push(fd_src);
+	std::istream fs (&filt_str);
+
+	int pass = 0;
+	unsigned int linesSoFar = 1;
+	unsigned int validTuples = 0;
+	unsigned int errorTuples = 0;
+	// ==========================
+	// Parse the File
+	// ==========================
+	// Loop pick a batch and process it at a time
+
+	<% my $headerLines = $model->getParameterByName("numHeaderLines");
+	   $headerLines = $headerLines->getValueAt(0)->getCppExpression() if $headerLines;
+	   if ($headerLines) { %>
+	   for (int i = 0; i < <%=$headerLines%>; i++) {
+	   std::string tmp;
+	   	std::getline(fs,tmp);
+	    linesSoFar++;
+	   }
+	   <%} # end if headerLines %>
+	if (fs.eof()) {
+		globalError(ERROR_UKNOWN_FILE_ERROR,"Unexpected EOF reached--no tuples generated.");
+	}
+
+	bool done = false;	 
+	size_t unprocessedStart = 0;
+	size_t unprocessedLength = 0;
+	while ( !done ) {
+		<% if ($profiling) { %>
+	    struct timespec startTime;
+	    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&startTime);
+	    <%}%>
+	    
+		// (1) Read a block of records
+		// ===========================
+
+		// copy the leftover stuff from last time to the front of the buffer.
+		// no effect if nothing leftover!
+		for (int i = 0; i < unprocessedLength; i++) {
+			inBuff[i] = inBuff[i+unprocessedStart];
+		}
+		// Block size to be read--don't overwrite the stuff we just added!
+		fs.read(inBuff+unprocessedLength,fileBufferSize-unprocessedLength);
+		size_t numRead = fs.gcount() + unprocessedLength; // how much real data is in the buffer
+		SPLAPPTRC(L_DEBUG,"Read " << fs.gcount() << " new char with " << unprocessedLength << " from last round gives " << numRead, logTag);
+        if (numRead==0) {
+            SPLAPPTRC(L_INFO,"Nothing left to process from file " << fileName,logTag);
+            done = true;
+            break;
+        }
+        // Determine if this is the last iteration 
+		if (fs.eof())    {
+			done = true; // WE ARE DONE
+            if (inBuff[numRead-1] != '\n') {
+                // This is okay because when we created inBuff, it's fileBufferSize+1.
+                inBuff[numRead] = '\n';
+                numRead++;
+            }
+		}
+		else {
+		// need to rollback to the last newline.
+			int rollBack = 0;
+			SPLAPPTRC(L_DEBUG,"inBuff[" << numRead-1<<"]=" << inBuff[numRead-1],logTag);
+			while ((inBuff[numRead - 1 - rollBack] != '\n') && (numRead > rollBack) && !done) {
+				SPLAPPTRC(L_DEBUG,"inBuff[" << numRead-1-rollBack<<"]=" << inBuff[numRead-1-rollBack],logTag);
+				rollBack++;
+			}
+			numRead = numRead -rollBack;
+			// save this for next time.
+			unprocessedLength = rollBack;
+			unprocessedStart = numRead;
+			SPLAPPTRC(L_DEBUG, "rollback = " << rollBack << " unprocessed length " << unprocessedLength << " unprocessedStart " << unprocessedStart,logTag);
+		}
+		
+		SPLAPPTRC(L_DEBUG,"First char " << inBuff[0] << " last char code " << (int)(inBuff[numRead-1]), logTag);
+		<% if ($profiling) { %>
+	    struct timespec endReadTime;
+	    clock_gettime(CLOCK_THREAD_CPUTIME_ID,&endReadTime);
+        readTime += timeDiffSec(&startTime,&endReadTime);
+	    <%}%>
+        SPLAPPTRC(L_DEBUG,"Processing block starting with line " << linesSoFar,logTag);
+        linesSoFar = processBlock(&(inBuff[0]),numRead,linesSoFar);
+        if (linesSoFar == 0) {
+            // We've hit an error.
+            close(fd);
+            return;
+        }
+        SPLAPPTRC(L_DEBUG,"Lines up to " << linesSoFar << " processed",logTag);
+		SPLAPPTRC(L_DEBUG,"Start line for next round is " << linesSoFar,logTag);
+
+		pass++;
+	}
+    close(fd);
+	SPLAPPTRC(L_DEBUG, "Finished " << fileName, logTag);
+    currFile="";
+		submit(Punctuation::WindowMarker,0);
+	<% if ($profiling) { %>
+		SPLAPPTRC(L_INFO, "File " << fileName << " readTime " << readTime << " parseTime " << parseTime << " submitTime " << submitTime << " (create = " << tupleCreateTime << " submit = " << submitOnlyTime << ")", logTag);
+		profileFile << "File " << fileName << " readTime " << readTime << " create = " << tupleCreateTime << " submit = " << submitOnlyTime << std::endl; 
+		if (shuttingDown) {
+			profileFile.close();
+		}
+	<%}%>
+}
+
+<%
+
+SPL::CodeGen::implementationEpilogue($model);%>
+

@@ -1,0 +1,38 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+
+composite Main {
+graph
+stream<ShortType> FiveFields = CSVFileSource() {
+    param file: "outputFuncShort.csv";
+    output FiveFields: nullVector = EmptyFieldVector(),
+           lineNumber=LineNumber();
+}
+
+() as checker = Custom(FiveFields) {
+logic
+    state: list<int32> maskList = [128,64,32,16,8,4,2,1];
+onTuple FiveFields: { 
+assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = 7 -i;
+        if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[i]+byteValue;
+        }
+     i++;
+    }
+    assert(byteValue == (int32)nullVector[0],"nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+    assert((int32)lineNumber%5==1,"Expected line number "+(rstring)lineNumber+" to have empty null vector");
+}
+}
+
+}
+}

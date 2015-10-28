@@ -1,0 +1,59 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 aninteger, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+// We use the same types as the recordTypes example.  Lines of type 7 will give an error.  
+composite Main {
+graph
+(stream<ShortType> Good;
+ stream<int32 code, rstring line> Errors) = CSVFileSource() {
+    param file: "recordType100000.csv";
+fileBufferSize: 15*16000;
+    output Good: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber();
+}
+
+//() as sinkgood = FileSink(Good) {
+//    param file: "good.out";
+//}
+
+//() as sinkbad = FileSink(Errors) {
+//    param file: "errors.out";
+//}
+
+() as checker = Custom(Good) {
+logic 
+    state: {
+        mutable int32 numTuples=0;
+        list<int32> maskList = [128,64,32,16,8,4,2,1];
+        mutable  uint64 lastLineNumber =1;
+    }
+onTuple Good: { 
+    numTuples++;
+    assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+//assert(nextLineNumber==lineNumber,"Expected tuple number "+(rstring)nextLineNumber+" to have matching line number, but found "+(rstring)lineNumber);
+lastLineNumber=lineNumber;
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+//appTrc(Trace.error,"Tuple is "+(rstring)FiveFields);
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = 7 -i;
+        if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[i]+byteValue;
+        }
+     i++;
+    }
+    assert(byteValue == (int32)nullVector[0],"nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+    assert((int32)lineNumber%11==1,"expected empty expectedVector on line "+(rstring)lineNumber);
+}
+}
+onPunct Good: {
+    assert(numTuples==800000,"Expected 900000 good tuples, found "+(rstring)numTuples);
+    assert(lastLineNumber==1099999ul,"Expected lastLineNumber to be  1099999, but found "+(rstring)lastLineNumber);
+}
+}
+}

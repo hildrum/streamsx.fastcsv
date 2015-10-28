@@ -1,0 +1,16 @@
+namespace test.source.common;
+public composite CheckTupleCount(input InStream) {
+
+param
+expression<int32> $numTuples;
+expression<rstring> $label: "default";
+graph
+() as counter = Custom(InStream) {
+   logic onPunct InStream:
+   	 if (currentPunct() == Sys.FinalMarker) {
+	 mutable int64 numTup = 0;
+	 getInputPortMetricValue(0u, Sys.nTuplesProcessed, numTup);
+	 assert((int64)$numTuples == numTup,"Expected "+(rstring)$numTuples+" and saw "+(rstring)numTup+" for "+$label);
+	 }
+}
+}

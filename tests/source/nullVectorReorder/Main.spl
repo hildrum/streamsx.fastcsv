@@ -1,0 +1,51 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector;
+
+composite Main {
+graph
+stream<ShortType> FiveFields = CSVFileSource() {
+    param file: "outputFuncShort100.csv";
+    output FiveFields: nullVector = EmptyFieldVector(),
+        recordType=Field(0),
+        expectedVector=Field(1),
+        floatone=Field(3), // switched!
+        floattwo=Field(2), // switched! 
+        intone=Field(4),
+        inttwo=Field(5);
+
+}
+
+() as checker = Custom(FiveFields) {
+logic
+    state: { 
+            // first bit in the vector corrsponds to the low bit in the nullVector.
+            // second big in the file expected vector corrponds ot hte second from right bit...
+            // third char in the file expected vecotor corrsponds to the 4th field in the output, which is in the 4th bit from the right...
+            list<int32> maskList = [1,2,8,4,16,32,64,128];
+            mutable int32 lineNum = 0;
+    }
+onTuple FiveFields: { 
+    lineNum++;
+assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = (i == 2) ? 3 : ((i==3)? 2: i);
+        appTrc(Trace.error,"vector pos "+(rstring)vectorPos+" from i "+(rstring)i);
+        if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[vectorPos]+byteValue;
+        }
+     i++;
+    }
+    assert(byteValue == (int32)nullVector[0],"Line: "+(rstring)lineNum+" nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+}
+}
+
+}
+}

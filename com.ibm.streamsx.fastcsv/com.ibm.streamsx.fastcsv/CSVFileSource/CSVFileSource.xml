@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<operatorModel xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://www.ibm.com/xmlns/prod/streams/spl/operator" xmlns:cmn="http://www.ibm.com/xmlns/prod/streams/spl/common" xsi:schemaLocation="http://www.ibm.com/xmlns/prod/streams/spl/operator operatorModel.xsd">
+  <cppOperatorModel>
+    <context>
+      <description>Write tuples to a file</description>
+      <customLiterals>
+        <enumeration>
+          <name>OclDevice</name>
+          <value>CPU_Intel</value>
+          <value>GPU_NVIDIA</value>
+        </enumeration>
+        <enumeration>
+          <name>CompressionAlg</name>
+          <value>gzip</value>
+          <value>zlib</value>
+          <value>bzip2</value>
+        </enumeration>
+      </customLiterals>
+      <customOutputFunctions>
+        <customOutputFunction>
+          <name>FieldSelectors</name>
+          <function pseudoFunction="true">
+            <description>Use the attribute index of the attribute as the csv index</description>
+            <prototype>&lt;any T> T AttributeIndex()</prototype>
+          </function>
+          <function pseudoFunction="true">
+            <description>The CSV field to be used to populate this attribute.  Counting starts at zero.</description>
+            <prototype>&lt;any T> T Field(int32 i)</prototype>
+          </function>
+          <function pseudoFunction="true">
+            <description></description>
+            <prototype>list&lt;uint8> EmptyFieldVector()</prototype>
+          </function>
+          <function pseudoFunction="true">
+            <description></description>
+            <prototype>uint64 LineNumber()</prototype>
+          </function>
+          <function>
+            <description/>
+            <prototype>&lt;any T> T Field(int32 i, T defaultVal)</prototype>
+          </function>
+        </customOutputFunction>
+      </customOutputFunctions>
+      <libraryDependencies>
+        <library>
+          <cmn:description sampleUri="">Open mp</cmn:description>
+          <cmn:managedLibrary>
+            <cmn:lib>gomp</cmn:lib>
+          </cmn:managedLibrary>
+        </library>
+        <library>
+          <cmn:description>Boost iostreams</cmn:description>
+          <cmn:managedLibrary>
+             <cmn:lib>boost_iostreams</cmn:lib>
+          </cmn:managedLibrary>
+      </library>
+      <library>
+          <cmn:description>Conversion funct</cmn:description>
+          <cmn:managedLibrary>
+              <cmn:includePath>../../impl/include</cmn:includePath>
+          </cmn:managedLibrary>
+      </library>
+      </libraryDependencies>
+      <providesSingleThreadedContext>Never</providesSingleThreadedContext>
+      <allowCustomLogic>true</allowCustomLogic>
+    </context>
+    <parameters>
+      <description></description>
+      <allowAny>false</allowAny>
+      <parameter>
+        <name>file</name>
+        <description></description>
+        <optional>true</optional>
+        <rewriteAllowed>true</rewriteAllowed>
+        <expressionMode>AttributeFree</expressionMode>
+        <type>rstring</type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>profileOutfile</name>
+        <description></description>
+        <optional>true</optional>
+        <rewriteAllowed>true</rewriteAllowed>
+        <expressionMode>AttributeFree</expressionMode>
+        <type>rstring</type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>fileBufferSize</name>
+        <description docHref="">Size of the file buffer used internally in bytes.</description>
+        <optional>true</optional>
+        <rewriteAllowed>false</rewriteAllowed>
+        <expressionMode>Constant</expressionMode>
+        <type></type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>separator</name>
+        <description>Character used to separate fields; defaults to ,</description>
+        <optional>true</optional>
+        <rewriteAllowed>true</rewriteAllowed>
+        <expressionMode>AttributeFree</expressionMode>
+        <type>rstring</type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>numOmpThreads</name>
+        <description>Number of threads to use. </description>
+        <optional>true</optional>
+        <rewriteAllowed>false</rewriteAllowed>
+        <expressionMode>Constant</expressionMode>
+        <type></type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>compression</name>
+        <description/>
+        <optional>true</optional>
+        <rewriteAllowed>false</rewriteAllowed>
+        <expressionMode>CustomLiteral</expressionMode>
+        <type>CompressionAlg</type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>numHeaderLines</name>
+        <description>Number of lines of the file assumed to be the header.   If not specified, we assume zero.</description>
+        <optional>true</optional>
+        <rewriteAllowed>true</rewriteAllowed>
+        <expressionMode>Expression</expressionMode>
+        <type>int32</type>
+        <cardinality>1</cardinality>
+      </parameter>
+      <parameter>
+        <name>requireValue</name>
+        <description>When true, all fields not given a default value are required.   When false, empty fields get a value 0 for numbers and empty string for strings.</description>
+        <optional>true</optional>
+        <rewriteAllowed>false</rewriteAllowed>
+        <expressionMode>Constant</expressionMode>
+        <type>boolean</type>
+        <cardinality>1</cardinality>
+      </parameter>
+    </parameters>
+    <inputPorts>
+      <inputPortSet>
+        <description sampleUri="">Optional input port for file names.</description>
+        <windowingDescription></windowingDescription>
+        <tupleMutationAllowed>false</tupleMutationAllowed>
+        <windowingMode>NonWindowed</windowingMode>
+        <windowPunctuationInputMode>Oblivious</windowPunctuationInputMode>
+        <cardinality>1</cardinality>
+        <optional>true</optional>
+      </inputPortSet>
+    </inputPorts>
+    <outputPorts>
+      <outputPortOpenSet>
+        <description></description>
+        <expressionMode>Expression</expressionMode>
+        <autoAssignment>true</autoAssignment>
+        <completeAssignment>false</completeAssignment>
+        <rewriteAllowed>true</rewriteAllowed>
+        <outputFunctions>
+          <default>AttributeIndex</default>
+          <type>FieldSelectors</type>
+        </outputFunctions>
+        <windowPunctuationOutputMode>Generating</windowPunctuationOutputMode>
+        <windowPunctuationInputPort>-1</windowPunctuationInputPort>
+        <tupleMutationAllowed>false</tupleMutationAllowed>
+      </outputPortOpenSet>
+    </outputPorts>
+  </cppOperatorModel>
+</operatorModel>

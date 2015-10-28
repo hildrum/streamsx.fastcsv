@@ -1,0 +1,36 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type MediumType = uint64 recordType, rstring expectedVector,uint64 two,rstring three, float32 four, uint64 five, uint64 six, uint64 seven,list<uint8> nullVector;
+composite Main {
+graph
+stream<MediumType> EightFields = CSVFileSource() {
+    param file: "outputFuncMediumLine100.csv";
+    output EightFields: nullVector = EmptyFieldVector();
+}
+
+() as checker = Custom(EightFields as I) {
+logic
+    state: list<int32> maskList = [128,64,32,16,8,4,2,1];
+onTuple I: { 
+assert(size(nullVector) == 2,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+assert(nullVector[1]==(uint8)0,"nullVector flag is set to zero");
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = 7 -i;
+        if (substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[i]+byteValue;
+        }
+     i++;
+    }
+    assert(byteValue == (int32)nullVector[0],"nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+}
+}
+
+}
+}

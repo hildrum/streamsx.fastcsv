@@ -1,0 +1,49 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+
+composite Main {
+graph
+(stream<ShortType> FiveFields;
+ stream<rstring line> Errors) = CSVFileSource() {
+    param file: "lineNumber100000.csv";
+fileBufferSize: 15*16000;
+requireValue: true;
+output FiveFields: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber(),
+            floatone = Field(2,(float32)(2.0*2.5));
+}
+/*
+() as errorSink = FileSink(Errors) {
+    param file: "defaultFloat_errors.out";
+}
+
+() as goodSink = FileSink(FiveFields) {
+    param file: "defaultFloat_good.out";
+}
+*/
+
+() as errors = Custom(Errors) {
+
+    logic state: {
+    mutable int32 numTuples =0;
+    }
+     onTuple Errors: 
+            numTuples++;
+onPunct Errors:
+          assert(numTuples==600000,"Expected 600000 errors, found "+(rstring)numTuples);
+}
+
+() as checker = Custom(FiveFields) {
+logic 
+    state: {
+        list<int32> maskList = [128,64,32,16,8,4,2,1];
+        mutable  uint64 lastLineNumber =1;
+    }
+onTuple FiveFields: { 
+assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+assert(recordType ==6ul || floatone==(float32)5.0,"Expected the float value to be 5.0, found "+(rstring)floatone+" in tuple "+(rstring)FiveFields);
+}
+}
+}

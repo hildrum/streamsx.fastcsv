@@ -1,0 +1,110 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+/**
+  * Check the global error conditions.
+  * This test checks the global error codes.  These are error codes that stop the processing on the whole file, rather than line errors,
+  * which only affect a particular line.
+  * 
+  * The first file doesn't exist, which gets error code 5.
+  * The second file causes a tuple overflow--ie, the filebuffer contains more tuples than there is room for.  
+  * The third file causes more errores than there is room for.  
+  * The fourth file is processed fine.
+  */
+
+composite Main {
+    param 
+    expression<list<rstring>> $filenames:["doesnotexist.csv","lineNumber100000.csv","allErrors100000.csv","lineNumber100.csv"];
+
+graph
+
+stream<rstring filename> Files = Beacon() {
+    param iterations: size($filenames);
+    output Files: 
+        filename = $filenames[IterationCount()];
+
+}
+   
+(stream<ShortType> FiveFields;
+ stream<int32 errorcode, rstring filename> RawErrors) = CSVFileSource(Files) {
+    output FiveFields: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber();
+}
+
+  //Let's not write files unless we're debugging the test.
+() as errorSink = FileSink(Errors) {
+    param file: 'errors.out';
+    flush: 1u;
+}
+/*
+() as goodSink = FileSink(FiveFields) {
+    param file: 'fivefields.out';
+flush:1u;
+}
+*/
+
+stream<RawErrors> Errors = Filter(RawErrors) {
+    param filter: errorcode != 2;
+}
+
+() as errorChecker = Custom(Errors as I) {
+    logic 
+        state: {
+    mutable int32 numTuples = 0;
+        }
+onTuple Errors: {
+    if (numTuples ==0) {
+         assert(filename==$filenames[0],"Expected error tuple to have filename "+$filenames[0]);
+         assert(errorcode==5,"Expected the error code to be 5:" +(rstring)Errors);
+
+    } else if (numTuples == 1) {
+        assert(filename==$filenames[1],"Expected error tuple to have filename "+$filenames[1]);
+        assert(errorcode==4,"Expected the error code to be 4:" +(rstring)Errors);
+    }
+    else if (numTuples == 2) {
+        assert(filename==$filenames[2],"Expected error tuple to have filename "+$filenames[2]);
+        assert(errorcode==4,"Expected error code to be 4:" + (rstring)Errors);
+    }
+    else {
+        assert(filename == $filenames[3],"On error tuple "+(rstring)numTuples+" got "+(rstring)Errors);
+        assert(errorcode!=4,"On error tuple "+(rstring)numTuples+" got "+(rstring)Errors);
+    }
+    numTuples++;
+}
+
+}
+
+() as checker = Custom(FiveFields) {
+logic 
+    state: {
+        list<int32> maskList = [128,64,32,16,8,4,2,1];
+        mutable  uint64 lastLineNumber =1;
+    }
+onTuple FiveFields: { 
+assert(size(nullVector) == 1,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+//assert(nextLineNumber==lineNumber,"Expected tuple number "+(rstring)nextLineNumber+" to have matching line number, but found "+(rstring)lineNumber);
+lastLineNumber=lineNumber;
+mutable int32 i=0;
+mutable int32 byteValue = 0;
+//appTrc(Trace.error,"Tuple is "+(rstring)FiveFields);
+if (length(expectedVector) > 0) {
+    while (i < 8) {
+        int32 vectorPos = 7 -i;
+        if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+            byteValue=maskList[i]+byteValue;
+        }
+     i++;
+    }
+    assert(byteValue == (int32)nullVector[0],"nullVector[0]="+(rstring)nullVector[0]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+}
+else {
+    assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+    assert((int32)lineNumber%8==1,"expected empty expectedVector on line "+(rstring)lineNumber);
+}
+}
+onPunct FiveFields:
+    if (currentPunct() == Sys.FinalMarker)
+        assert(lastLineNumber==800ul,"Expected lastLineNumber to be 800, but found "+(rstring)lastLineNumber);
+}
+}

@@ -1,0 +1,42 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type LongType = uint64 recordType, rstring expectedVector,uint64 two,rstring three, float32 four,uint64 five, uint64 six, uint64 seven,uint64 eight, uint64 nine, list<uint8> nullVector;
+
+composite Main {
+graph
+stream<LongType> MultiByte = CSVFileSource() {
+    param file: "outputFuncLongLine100.csv";
+    output MultiByte: nullVector = EmptyFieldVector();
+}
+
+() as checker = Custom(MultiByte as I) {
+logic
+    state: list<int32> maskList = [1,2,4,8,16,32,64,128];
+onTuple I: { 
+    assert(size(nullVector) == 2,"Vector size is "+(rstring)size(nullVector)+" expected 1");
+    assert(nullVector[1]/(uint8)8 == (uint8)0,"nullVector flag must be zero, found "+(rstring)nullVector[1]);
+    if (length(expectedVector) > 0) {
+        mutable int32 byteNumber = 0;
+        while (byteNumber < size(nullVector)) {
+            mutable int32 i = 0;
+            mutable int32 byteValue = 0;
+            while (i < 8) {
+                int32 vectorPos = i%8 // reverse the byte
+                    + byteNumber*8;
+                if (vectorPos < length(expectedVector) && substring(expectedVector,vectorPos,1) == "1") {
+                byteValue=maskList[i]+byteValue;
+                }
+            i++;
+            }
+            assert(byteValue == (int32)nullVector[byteNumber],"nullVector["+(rstring)byteNumber+"]="+(rstring)nullVector[byteNumber]+", expectedVector is "+expectedVector+" and the byte value is "+(rstring)byteValue);
+    byteNumber++;   
+        }
+    }
+    else {
+        assert(nullVector[0]==(uint8)2,"expectedVector is empty.");
+    }
+}
+
+}
+}

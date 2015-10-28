@@ -1,0 +1,122 @@
+/* Additional includes go here */
+
+#include "boost/dynamic_bitset.hpp"
+  <% if ($model->getParameterByName("profileOutfile")) { %>
+#include <iostream>
+#include <fstream>
+
+      <%}%>
+<%
+require BatchFileSourceCommon;
+
+my $tuplesPerBatch = $model->getParameterByName("tuplesPerBatch");
+if ($tuplesPerBatch) {
+    my $tmp = $tuplesPerBatch->getValueAt(0)->getCppExpression();
+    $tuplesPerBatch=SPL::CodeGen::extractPerlValue($tmp,$tuplesPerBatch->getValueAt(0)->getSPLType());
+}
+else {
+    $tuplesPerBatch=16000;
+}
+
+my $numThreads = $model->getParameterByName("numThreads");
+if ($numThreads) {
+    $numThreads = SPL::CodeGen::extractPerlValue($numThreads->getValueAt(0)->getCppExpression(),$numThreads->getValueAt(0)->getSPLType());
+        SPL::CodeGen::exitln("Problem getting perl value from numThreads") unless $numThreads;
+        }
+
+
+%>
+#define ERROR_UNKNOWN_RECORD_TYPE  1
+#define ERROR_PARSING_LINE 2 
+#define ERROR_NO_RECORD_TYPE 3
+#define ERROR_TOO_MANY_RECORDS 4
+#define ERROR_FILE_DID_NOT_OPEN 5
+#define ERROR_UKNOWN_FILE_ERROR 6
+
+
+<%SPL::CodeGen::headerPrologue($model);%>
+
+<%
+  my $iPort = $model->getInputPortAt(0);
+  my ($numOutputs,$useRecordType, $errorPort)  = BatchFileSourceCommon::getOutputPortInfo($model);
+  my $numNonErrorOutputs = $numOutputs;
+  if ($errorPort) {
+  	$numNonErrorOutputs--;
+  }
+ %>
+
+class MY_OPERATOR : public MY_BASE_OPERATOR 
+{
+public:
+  // Constructor
+  MY_OPERATOR();
+
+  // Notify port readiness
+  void allPortsReady(); 
+
+  // Processing for source and threaded operators   
+  void process(uint32_t idx);
+ 
+  // Tuple processing for non-mutating ports
+  void process(Tuple const & tuple, uint32_t port);
+
+  void prepareToShutdown();
+
+private:
+
+  double timeDiffSec(struct timespec *,struct timespec *);
+
+  void setFileVariables(<%=((defined $iPort) ? "IPort0Type const & tuple" :  "")%>);
+  std::string currFile;
+  // Members
+  void parseNetroFile(SPL::rstring filename) ;
+  char separator;
+  Mutex _mutex;
+  
+  // file handle 
+  FILE * fp; 
+  size_t leftOver;
+  size_t charRead;
+  
+  // Buffer to block read a large chunk from the DPI file to be parsed
+  char * inBuff;
+  
+  std::vector<OPort0Type> port0Tuples;
+  boost::dynamic_bitset<> outTupleValid;
+  std::vector<uint> lineStart;
+  std::string getErrorString(int code);
+  
+  bool parseLine(int lineNum,const char * input, size_t & startOffset, const size_t maxOffset, OPort0Type & tuple);
+    // Parsed output buffers
+  unsigned int processBlock(const char * inBuff, const size_t len, int lineBase);
+  <%
+  my $oPort = $model->getOutputPortAt(0);
+  for (my $j = 0; $j < SPL::Operator::Instance::OutputPort::getNumberOfAttributes($oPort); $j++) {
+		my $attr = $oPort->getAttributeAt($j);
+		next unless $attr->hasAssignment();
+		# so now we know it has an assignment.
+		my $attrName = $attr->getName();
+		my $attrType = $attr->getCppType();
+		next if ($attr->hasAssignmentWithOutputFunction() && ($attr->getAssignmentOutputFunctionName() ne "AttributeIndex"));
+		# so now we know that we have an assignment, but either it's the default output function or no output function.
+			print "   $attrType port0_${attrName};\n";
+    } #end attribute loop
+  %>
+  void handleError(const int code, const int lineNum, const size_t lineStart, const size_t lineLen);
+  void globalError(int code, std::string const & message);
+  std::string logTag;
+  size_t fileBufferSize;
+  <% if ($model->getParameterByName("profileOutfile")) { %>
+	double readTime;
+	double parseTime;
+	double submitTime;
+	double tupleCreateTime;
+	double submitOnlyTime;
+	std::ofstream profileFile;
+   <%}%>
+   boolean shuttingDown;
+}; 
+
+
+<%SPL::CodeGen::headerEpilogue($model);%>
+

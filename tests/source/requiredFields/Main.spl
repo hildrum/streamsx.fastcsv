@@ -1,0 +1,30 @@
+use test.source.common::*;
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+type ShortType = uint64 recordType, rstring expectedVector, float32 floatone, float32 floattwo,uint64 intone, uint64 inttwo, list<uint8> nullVector, uint64 lineNumber;
+
+composite Main {
+graph
+(stream<ShortType> FiveFields;
+ stream<rstring line> Errors) = CSVFileSource() {
+    param file: "lineNumber100000.csv";
+fileBufferSize: 15*16000;
+requireValue: true;
+                output FiveFields: nullVector = EmptyFieldVector(),
+            lineNumber = LineNumber();
+}
+
+() as checker = Custom(Errors) {
+    
+    logic state : {
+        mutable int32 numTuples = 0;
+    }
+    onTuple Errors:
+       numTuples++;
+    onPunct Errors:
+       // Last tuple i sthe "no tuples in file" error.
+       assert(numTuples == 700000,"Expected 700000 error tuples, got "+(rstring)numTuples);
+
+}
+
+}

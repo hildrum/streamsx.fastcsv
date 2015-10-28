@@ -1,0 +1,21 @@
+
+use com.ibm.streamsx.fastcsv::CSVFileSource;
+
+composite Main
+{
+    graph
+
+    stream<uint64 f1, uint64 f2> Data as O = CSVFileSource() {
+                                            param
+
+                                                            file : "twoInt100000.csv";
+fileBufferSize : 64*1000;
+                                                                           
+                                                                                        output O: 
+                                                                                                        f1 = Field(0),
+                                                                                                                        f2 = Field(1);
+
+
+                                                                                                                                }
+                                                                                                                                                                                                                    }
+
