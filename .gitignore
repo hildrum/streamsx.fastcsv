@@ -10,5 +10,4 @@ toolkit.xml
 /tests/source/data.common/allErrors*.csv
 /tests/source/data.common/recordType*.csv
 /tests/source/data.common/twoInt*.csv
-
-
+/tests/source/data.common/*.gz
