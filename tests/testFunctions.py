@@ -104,6 +104,8 @@ def main(argv):
            compileargs = compileargs + ['-a'];
         if ('--tracelevel' == o):
             runargs=['-t',str(level)]
+    exec_noexit(['spl-make-toolkit','-i','source.common'])
+    exec_noexit(['spl-make-toolkit','-i','../../com.ibm.streamsx.fastcvs'])
     if (len(extras) == 0):
        runDirectory('source',testlist,compileargs,runargs)
        runDirectory('sink',testlist,compileargs,runargs)

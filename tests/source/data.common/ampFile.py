@@ -49,7 +49,7 @@ def main(argv):
             replays= int(a)
         else: 
             assert False, "unhandled option"
-    createFileRaw(infile,outfile,repeats,0)
+    createFileRaw(infile,outfile,replays,0)
 
 if __name__ == "__main__":
     main(sys.argv[1:])
