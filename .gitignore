@@ -1,0 +1,14 @@
+data
+output
+toolkit.xml
+*_h.pm
+*_cpp.pm
+*.out
+*.pyc
+/tests/source/data.common/lineNumber*.csv
+/tests/source/data.common/outputFunc*.csv
+/tests/source/data.common/allErrors*.csv
+/tests/source/data.common/recordType*.csv
+/tests/source/data.common/twoInt*.csv
+
+
